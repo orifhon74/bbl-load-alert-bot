@@ -43,7 +43,7 @@ if not BOT_TOKEN:
 if not API_ID or not API_HASH:
     raise RuntimeError("Missing API_ID/API_HASH in .env")
 
-SESSION_PATH = os.getenv("SESSION_PATH", "./listener_session")
+SESSION_PATH = os.getenv("SESSION_PATH", "/data/bbl_listener_session")
 tele_client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
 # -----------------------

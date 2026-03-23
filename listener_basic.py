@@ -17,7 +17,7 @@ try:
 except ValueError:
     raise RuntimeError("CHANNEL_ID must be an integer")
 
-SESSION_PATH = os.getenv("SESSION_PATH", "./listener_session")
+SESSION_PATH = os.getenv("SESSION_PATH", "/data/bbl_listener_session")
 client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
 STOP_RE = re.compile(r"Stop\s+\d+:\s*(.+)", re.IGNORECASE)

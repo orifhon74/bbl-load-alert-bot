@@ -1,7 +1,7 @@
 import os
 import aiosqlite
 
-DB_PATH = os.getenv("DB_PATH", "./bbl_prefs.db")
+DB_PATH = os.getenv("DB_PATH", "/data/bbl_prefs.db")
 
 def norm_city(city: str) -> str:
     return city.strip().upper()
