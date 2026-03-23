@@ -7,29 +7,57 @@ load_dotenv()
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")
 
-# Session file will be created after first login
-client = TelegramClient("listener_session", API_ID, API_HASH)
+CHANNEL_ID_RAW = os.getenv("CHANNEL_ID")
+if not CHANNEL_ID_RAW:
+    raise RuntimeError("Missing CHANNEL_ID in .env")
 
-# Extract lines like: 📍 LOUISVILLE, KY
-LOC_RE = re.compile(r"📍\s*([A-Z][A-Z\s\.\'-]+?),\s*([A-Z]{2})")
+try:
+    TARGET_CHAT = int(CHANNEL_ID_RAW)
+except ValueError:
+    raise RuntimeError("CHANNEL_ID must be an integer")
 
-@client.on(events.NewMessage(chats=CHANNEL_USERNAME))
+SESSION_PATH = os.getenv("SESSION_PATH", "./listener_session")
+client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
+
+STOP_RE = re.compile(r"Stop\s+\d+:\s*(.+)", re.IGNORECASE)
+CITY_STATE_RE = re.compile(r"([A-Z][A-Z\s\.\'-]+?),\s*([A-Z]{2}),\s*USA\b", re.IGNORECASE)
+
+
+def parse_stops(text: str):
+    stop_lines = STOP_RE.findall(text or "")
+    if len(stop_lines) < 2:
+        return []
+
+    stops = []
+    for line in stop_lines:
+        line = line.strip().upper()
+        m = CITY_STATE_RE.search(line)
+        if m:
+            city = m.group(1).strip().upper()
+            state = m.group(2).strip().upper()
+            stops.append((city, state))
+
+    return stops if len(stops) >= 2 else []
+
+
+@client.on(events.NewMessage(chats=TARGET_CHAT))
 async def on_new_message(event):
     text = event.raw_text or ""
-    locs = LOC_RE.findall(text)
+    stops = parse_stops(text)
 
-    if not locs:
+    if not stops:
         return
 
     print("\n=== NEW LOAD ===")
-    for city, st in locs:
-        print(f"{city.strip().title()}, {st}")
+    for i, (city, st) in enumerate(stops, 1):
+        print(f"Stop {i}: {city.title()}, {st}")
+
 
 async def main():
-    print(f"Listening to @{CHANNEL_USERNAME} ...")
+    print(f"Listening to {TARGET_CHAT} ...")
     await client.run_until_disconnected()
+
 
 if __name__ == "__main__":
     client.start()

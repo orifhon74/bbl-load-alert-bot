@@ -16,10 +16,10 @@ from telegram.ext import (
 
 from db import (
     init_db,
-    add_origin_point, remove_origin_point, clear_origin_points,
-    add_origin_state, remove_origin_state, clear_origin_states,
+    add_origin_point, clear_origin_points,
+    add_origin_state, clear_origin_states,
     set_to_all,
-    add_destination_state, remove_destination_state, clear_destination_states,
+    add_destination_state, clear_destination_states,
     get_user_view, get_all_configs
 )
 
@@ -27,15 +27,23 @@ load_dotenv()
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+CHANNEL_ID_RAW = os.getenv("CHANNEL_ID")
+if not CHANNEL_ID_RAW:
+    raise RuntimeError("Missing CHANNEL_ID in .env")
+
+try:
+    TARGET_CHAT = int(CHANNEL_ID_RAW)
+except ValueError:
+    raise RuntimeError("CHANNEL_ID must be an integer")
 
 if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN in .env")
-if not API_ID or not API_HASH or not CHANNEL_USERNAME:
-    raise RuntimeError("Missing API_ID/API_HASH/CHANNEL_USERNAME in .env")
+if not API_ID or not API_HASH:
+    raise RuntimeError("Missing API_ID/API_HASH in .env")
 
-SESSION_PATH = os.getenv("SESSION_PATH", "/data/listener_session")
+SESSION_PATH = os.getenv("SESSION_PATH", "./listener_session")
 tele_client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
 # -----------------------
@@ -53,11 +61,12 @@ if ALLOWED_USER_IDS_RAW:
             except ValueError:
                 raise RuntimeError(f"Invalid ALLOWED_USER_IDS entry: '{x}'. Must be integers.")
 
+
 def is_allowed(user_id: int) -> bool:
-    # If env var is empty => allow everyone (dev mode)
     if not ALLOWED_USER_IDS:
         return True
     return user_id in ALLOWED_USER_IDS
+
 
 async def require_allowed(update: Update) -> bool:
     uid = update.effective_user.id
@@ -66,8 +75,48 @@ async def require_allowed(update: Update) -> bool:
         return False
     return True
 
-# Parse: 📍 CITY, ST (2+ times)
-LOC_RE = re.compile(r"📍\s*([A-Z][A-Z\s\.\'-]+?),\s*([A-Z]{2})")
+
+# -----------------------
+# BBL parser
+# -----------------------
+STOP_RE = re.compile(r"Stop\s+\d+:\s*(.+)", re.IGNORECASE)
+CITY_STATE_RE = re.compile(r"([A-Z][A-Z\s\.\'-]+?),\s*([A-Z]{2}),\s*USA\b", re.IGNORECASE)
+
+
+def parse_stops(text: str):
+    """
+    Parse BBL messages like:
+
+    Stop 1: 1960 S INDUSTRIAL RD SALT LAKE CITY, UT, USA 84199
+    Stop 2: 7007 NE CORNFOOT RD PORTLAND, OR, USA 97218
+
+    Returns:
+        [(CITY_UPPER, ST), ...]
+    """
+    stop_lines = STOP_RE.findall(text or "")
+    if len(stop_lines) < 2:
+        return []
+
+    stops = []
+    for line in stop_lines:
+        line = line.strip().upper()
+
+        m = CITY_STATE_RE.search(line)
+        if not m:
+            continue
+
+        city = m.group(1).strip().upper()
+        state = m.group(2).strip().upper()
+        stops.append((city, state))
+
+    return stops if len(stops) >= 2 else []
+
+
+def origin_destination(stops):
+    """
+    Origin = first stop, Destination = last stop
+    """
+    return stops[0], stops[-1]
 
 
 # -----------------------
@@ -104,7 +153,7 @@ def title_city(city_upper: str) -> str:
 def parse_city_state_arg(text: str):
     """
     Accepts:
-      "Louisville, KY" OR "Louisville KY"
+      "Salt Lake City, UT" OR "Salt Lake City UT"
     Returns (city, ST) or raises ValueError
     """
     text = text.strip()
@@ -124,7 +173,7 @@ def parse_city_state_arg(text: str):
 
     st = st.strip().upper()
     if len(st) != 2:
-        raise ValueError("State must be 2 letters (e.g. OH).")
+        raise ValueError("State must be 2 letters (e.g. UT).")
 
     return city, st
 
@@ -132,7 +181,7 @@ def parse_city_state_arg(text: str):
 def parse_state_only(text: str) -> str:
     st = (text or "").strip().upper()
     if len(st) != 2 or not st.isalpha():
-        raise ValueError("State must be 2 letters (e.g. OH).")
+        raise ValueError("State must be 2 letters (e.g. UT).")
     return st
 
 
@@ -158,34 +207,14 @@ def format_user_list(view: dict) -> str:
 
 
 # -----------------------
-# Matching helpers
-# -----------------------
-def parse_stops(text: str):
-    """
-    Returns list of stops [(CITY_UPPER, ST), ...] length >= 2, or [].
-    """
-    locs = LOC_RE.findall(text or "")
-    if len(locs) < 2:
-        return []
-    return [(c.strip().upper(), s.strip().upper()) for c, s in locs]
-
-
-def origin_destination(stops):
-    """
-    Origin = first stop, Destination = last stop
-    """
-    return stops[0], stops[-1]
-
-
-# -----------------------
-# Commands (optional power users)
+# Commands
 # -----------------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_allowed(update):
         return
 
     msg = (
-        "USPS Load Alerts\n\n"
+        "BBL Load Alerts\n\n"
         "Use the buttons below.\n"
         "Origin = FIRST stop. Destination = LAST stop.\n"
     )
@@ -201,10 +230,6 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def whoami_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Useful for debugging/allowlist collection.
-    (This still respects allowlist, so only allowed users can see it.)
-    """
     if not await require_allowed(update):
         return
     await update.message.reply_text(f"Your Telegram user ID is: {update.effective_user.id}", reply_markup=MAIN_KB)
@@ -231,7 +256,7 @@ async def testlast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dest_states = set(view["destination_states"])
 
     msgs = []
-    async for m in tele_client.iter_messages(CHANNEL_USERNAME, limit=n):
+    async for m in tele_client.iter_messages(TARGET_CHAT, limit=n):
         if m and m.message:
             msgs.append(m.message)
     msgs.reverse()
@@ -240,6 +265,7 @@ async def testlast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stops = parse_stops(text)
         if not stops:
             return False
+
         (o_city, o_state), (_d_city, d_state) = origin_destination(stops)
 
         origin_ok = ((o_city, o_state) in origin_points) or (o_state in origin_states)
@@ -281,9 +307,9 @@ async def menu_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = (
         "How to use:\n"
-        f"- Tap {BTN_ADD_ORIGIN_CITY} then type: City, ST (example: Cincinnati, OH)\n"
-        f"- Tap {BTN_ADD_ORIGIN_STATE} then type: ST (example: OH)\n"
-        f"- Tap {BTN_ADD_DEST} then type: ST (example: CO)\n"
+        f"- Tap {BTN_ADD_ORIGIN_CITY} then type: City, ST (example: Salt Lake City, UT)\n"
+        f"- Tap {BTN_ADD_ORIGIN_STATE} then type: ST (example: UT)\n"
+        f"- Tap {BTN_ADD_DEST} then type: ST (example: OR)\n"
         f"- Tap {BTN_TOGGLE_ALL} to allow all destination states\n"
         f"- Tap {BTN_VIEW} to see your settings\n"
     )
@@ -310,7 +336,7 @@ async def handle_free_text_input(update: Update, context: ContextTypes.DEFAULT_T
             return await update.message.reply_text("✅ Added origin city.\n\n" + format_user_list(view), reply_markup=MAIN_KB)
         except Exception as e:
             return await update.message.reply_text(
-                f"Try again: City, ST\nExample: Cincinnati, OH\n({e})",
+                f"Try again: City, ST\nExample: Salt Lake City, UT\n({e})",
                 reply_markup=ReplyKeyboardRemove()
             )
 
@@ -323,7 +349,7 @@ async def handle_free_text_input(update: Update, context: ContextTypes.DEFAULT_T
             return await update.message.reply_text("✅ Added origin state.\n\n" + format_user_list(view), reply_markup=MAIN_KB)
         except Exception as e:
             return await update.message.reply_text(
-                f"Try again: ST\nExample: OH\n({e})",
+                f"Try again: ST\nExample: UT\n({e})",
                 reply_markup=ReplyKeyboardRemove()
             )
 
@@ -336,7 +362,7 @@ async def handle_free_text_input(update: Update, context: ContextTypes.DEFAULT_T
             return await update.message.reply_text("✅ Added destination state.\n\n" + format_user_list(view), reply_markup=MAIN_KB)
         except Exception as e:
             return await update.message.reply_text(
-                f"Try again: ST\nExample: CO\n({e})",
+                f"Try again: ST\nExample: OR\n({e})",
                 reply_markup=ReplyKeyboardRemove()
             )
 
@@ -351,21 +377,21 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
     if text == BTN_ADD_ORIGIN_CITY:
         context.user_data["awaiting"] = "origin_city"
         return await update.message.reply_text(
-            "Send Origin City as: City, ST\nExample: Cincinnati, OH",
+            "Send Origin City as: City, ST\nExample: Salt Lake City, UT",
             reply_markup=ReplyKeyboardRemove()
         )
 
     if text == BTN_ADD_ORIGIN_STATE:
         context.user_data["awaiting"] = "origin_state"
         return await update.message.reply_text(
-            "Send Origin State as 2 letters.\nExample: OH",
+            "Send Origin State as 2 letters.\nExample: UT",
             reply_markup=ReplyKeyboardRemove()
         )
 
     if text == BTN_ADD_DEST:
         context.user_data["awaiting"] = "dest_state"
         return await update.message.reply_text(
-            "Send Destination State as 2 letters.\nExample: CO",
+            "Send Destination State as 2 letters.\nExample: OR",
             reply_markup=ReplyKeyboardRemove()
         )
 
@@ -403,7 +429,7 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
 # -----------------------
 # Telethon listener -> bot alerts
 # -----------------------
-@tele_client.on(events.NewMessage(chats=CHANNEL_USERNAME))
+@tele_client.on(events.NewMessage(chats=TARGET_CHAT))
 async def on_new_message(event):
     text = event.raw_text or ""
     stops = parse_stops(text)
@@ -419,16 +445,13 @@ async def on_new_message(event):
     alert = f"🚚 LOAD MATCH\n\n{text}"
 
     for cfg in configs:
-        # Hard block any unauthorized user even if they somehow exist in DB
         if not is_allowed(cfg["user_id"]):
             continue
 
-        # Origin match: FIRST stop only
         origin_ok = ((o_city, o_state) in cfg["origin_points"]) or (o_state in cfg["origin_states"])
         if not origin_ok:
             continue
 
-        # Destination match: LAST stop state only
         if cfg["to_all"] or (d_state in cfg["destination_states"]):
             try:
                 await bot_app.bot.send_message(chat_id=cfg["user_id"], text=alert)
@@ -455,7 +478,6 @@ async def main():
     bot_app.add_handler(CommandHandler("testlast", testlast_cmd))
     bot_app.add_handler(CommandHandler("whoami", whoami_cmd))
 
-    # UI handlers (typed input first, then menu buttons)
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_text_input), group=0)
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_buttons), group=1)
 
