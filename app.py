@@ -1,9 +1,11 @@
 import os
 import re
+import math
 import asyncio
 from dotenv import load_dotenv
 
 from telethon import TelegramClient, events
+import pgeocode
 
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
@@ -46,6 +48,13 @@ if not API_ID or not API_HASH:
 SESSION_PATH = os.getenv("SESSION_PATH", "/data/bbl_listener_session")
 tele_client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
+ZIP_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
+STOP_RE = re.compile(r"Stop\s+\d+:\s*(.+)", re.IGNORECASE)
+FALLBACK_CITY_STATE_RE = re.compile(r"([A-Z][A-Z\s\.\'-]+?),\s*([A-Z]{2}),\s*USA\b", re.IGNORECASE)
+
+zip_db = pgeocode.Nominatim("us")
+
+
 # -----------------------
 # Allowlist (PRIVATE BOT)
 # -----------------------
@@ -79,8 +88,54 @@ async def require_allowed(update: Update) -> bool:
 # -----------------------
 # BBL parser
 # -----------------------
-STOP_RE = re.compile(r"Stop\s+\d+:\s*(.+)", re.IGNORECASE)
-CITY_STATE_RE = re.compile(r"([A-Z][A-Z\s\.\'-]+?),\s*([A-Z]{2}),\s*USA\b", re.IGNORECASE)
+def _is_missing(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    text = str(value).strip()
+    return text == "" or text.lower() == "nan"
+
+
+def normalize_city(city: str) -> str:
+    return " ".join(city.strip().upper().split())
+
+
+def extract_city_state_from_stop(line: str):
+    """
+    Preferred strategy:
+    1) Extract ZIP code and resolve city/state using pgeocode
+    2) Fallback to regex if ZIP lookup fails
+    """
+    line_upper = (line or "").strip().upper()
+
+    zip_match = ZIP_RE.search(line_upper)
+    if zip_match:
+        zip_code = zip_match.group(1)
+        info = zip_db.query_postal_code(zip_code)
+
+        place_name = getattr(info, "place_name", None)
+        state_code = getattr(info, "state_code", None)
+
+        if not _is_missing(place_name) and not _is_missing(state_code):
+            city = normalize_city(str(place_name))
+            state = str(state_code).strip().upper()
+            return city, state
+
+    # Fallback if ZIP lookup fails
+    m = FALLBACK_CITY_STATE_RE.search(line_upper)
+    if not m:
+        return None
+
+    raw_city = normalize_city(m.group(1))
+    state = m.group(2).strip().upper()
+
+    # Heuristic fallback: strip likely street junk by keeping trailing words
+    words = raw_city.split()
+    if len(words) > 4:
+        raw_city = " ".join(words[-4:])
+
+    return raw_city, state
 
 
 def parse_stops(text: str):
@@ -99,15 +154,9 @@ def parse_stops(text: str):
 
     stops = []
     for line in stop_lines:
-        line = line.strip().upper()
-
-        m = CITY_STATE_RE.search(line)
-        if not m:
-            continue
-
-        city = m.group(1).strip().upper()
-        state = m.group(2).strip().upper()
-        stops.append((city, state))
+        result = extract_city_state_from_stop(line)
+        if result:
+            stops.append(result)
 
     return stops if len(stops) >= 2 else []
 
@@ -171,7 +220,9 @@ def parse_city_state_arg(text: str):
         st = parts[-1]
         city = " ".join(parts[:-1])
 
+    city = normalize_city(city)
     st = st.strip().upper()
+
     if len(st) != 2:
         raise ValueError("State must be 2 letters (e.g. UT).")
 

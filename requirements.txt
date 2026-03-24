@@ -11,3 +11,4 @@ python-dotenv==1.2.1
 python-telegram-bot==21.6
 rsa==4.9.1
 Telethon==1.42.0
+pgeocode==0.5.0
