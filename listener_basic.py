@@ -21,7 +21,10 @@ SESSION_PATH = os.getenv("SESSION_PATH", "/data/bbl_listener_session")
 client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
 
 STOP_RE = re.compile(r"Stop\s+\d+:\s*(.+)", re.IGNORECASE)
-CITY_STATE_RE = re.compile(r"([A-Z][A-Z\s\.\'-]+?),\s*([A-Z]{2}),\s*USA\b", re.IGNORECASE)
+CITY_STATE_RE = re.compile(
+    r"(?:\d+\s+.*?\s)?([A-Z\s\.\'-]+?),\s*([A-Z]{2}),\s*USA\b",
+    re.IGNORECASE
+)
 
 
 def parse_stops(text: str):
@@ -32,11 +35,19 @@ def parse_stops(text: str):
     stops = []
     for line in stop_lines:
         line = line.strip().upper()
+
         m = CITY_STATE_RE.search(line)
-        if m:
-            city = m.group(1).strip().upper()
-            state = m.group(2).strip().upper()
-            stops.append((city, state))
+        if not m:
+            continue
+
+        raw_city = m.group(1).strip().upper()
+        state = m.group(2).strip().upper()
+
+        # Clean city (remove street parts)
+        words = raw_city.split()
+        city = " ".join(words[-4:]) if len(words) >= 4 else raw_city
+
+        stops.append((city, state))
 
     return stops if len(stops) >= 2 else []
 
